@@ -1,0 +1,72 @@
+// aws-greengrass-lite - AWS IoT Greengrass runtime for constrained devices
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+#include <servicemgrd.h>
+#include <gg/buffer.h>
+#include <gg/error.h>
+#include <gg/log.h>
+#include <gg/map.h>
+#include <gg/object.h>
+#include <gg/types.h>
+#include <ggl/core_bus/server.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+static GgError start_component(void *ctx, GgMap params, uint32_t handle) {
+    (void) ctx;
+    (void) params;
+    GG_LOGI("start_component called (stub).");
+    ggl_respond(handle, GG_OBJ_NULL);
+    return GG_ERR_OK;
+}
+
+static GgError stop_component(void *ctx, GgMap params, uint32_t handle) {
+    (void) ctx;
+    (void) params;
+    GG_LOGI("stop_component called (stub).");
+    ggl_respond(handle, GG_OBJ_NULL);
+    return GG_ERR_OK;
+}
+
+static GgError get_status(void *ctx, GgMap params, uint32_t handle) {
+    (void) ctx;
+    (void) params;
+    GG_LOGI("get_status called (stub).");
+    ggl_respond(
+        handle,
+        gg_obj_map(GG_MAP(
+            gg_kv(GG_STR("lifecycle_state"), gg_obj_buf(GG_STR("INSTALLED")))
+        ))
+    );
+    return GG_ERR_OK;
+}
+
+static GgError subscribe_to_lifecycle(
+    void *ctx, GgMap params, uint32_t handle
+) {
+    (void) ctx;
+    (void) params;
+    (void) handle;
+    GG_LOGW("subscribe_to_lifecycle not yet implemented.");
+    return GG_ERR_UNSUPPORTED;
+}
+
+GgError run_servicemgrd(void) {
+    static GglRpcMethodDesc handlers[]
+        = { { GG_STR("start_component"), false, start_component, NULL },
+            { GG_STR("stop_component"), false, stop_component, NULL },
+            { GG_STR("get_status"), false, get_status, NULL },
+            { GG_STR("subscribe_to_lifecycle"),
+              true,
+              subscribe_to_lifecycle,
+              NULL } };
+    static const size_t HANDLERS_LEN = sizeof(handlers) / sizeof(handlers[0]);
+
+    GG_LOGI("gg-servicemgrd starting coreBus listener on gg_supervisor.");
+    GgError ret = ggl_listen(GG_STR("gg_supervisor"), handlers, HANDLERS_LEN);
+    GG_LOGE("Exiting with error %u.", (unsigned) ret);
+
+    return GG_ERR_FAILURE;
+}

@@ -1,0 +1,19 @@
+[Unit]
+StartLimitInterval=20
+StartLimitBurst=10
+PartOf=greengrass-lite.target
+
+[Install]
+WantedBy=greengrass-lite.target
+
+[Service]
+Type=simple
+ExecStart=@CMAKE_INSTALL_PREFIX@/@CMAKE_INSTALL_BINDIR@/@name@
+Restart=always
+RestartSec=1
+CapabilityBoundingSet=~CAP_SYS_ADMIN ~CAP_SYS_PTRACE
+WorkingDirectory=/var/lib/greengrass
+
+[Unit]
+Description=core-bus s6-backed service manager
+After=ggl.core.ggconfigd.service

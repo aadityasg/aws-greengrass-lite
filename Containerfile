@@ -9,6 +9,7 @@ RUN apt-get update \
     cgroup-tools build-essential pkg-config cmake git curl gdb python3-venv \
     libssl-dev libcurl4-openssl-dev libsqlite3-dev sqlite3 libyaml-dev \
     libsystemd-dev liburiparser-dev uuid-dev libevent-dev libzip-dev \
+    s6 \
   && apt-get clean
 
 COPY misc/container/getty-override.conf \
@@ -47,4 +48,5 @@ RUN systemctl enable \
   ggl.core.ggpubsubd.service \
   ggl.core.gghealthd.service \
   ggl.core.ggipcd.service \
+  ggl.core.gg-servicemgrd.service \
   ggl.aws.greengrass.TokenExchangeService.service

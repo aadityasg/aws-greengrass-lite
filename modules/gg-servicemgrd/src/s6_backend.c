@@ -62,6 +62,24 @@ static GgError write_run_script(
     );
     fclose(f);
     chmod(run_path, 0755);
+
+    // Write finish script: stop restarting on clean exit (exit code 0)
+    char finish_path[PATH_MAX];
+    snprintf(finish_path, sizeof(finish_path), "%s/finish", service_dir);
+    FILE *ff = fopen(finish_path, "w");
+    if (ff != NULL) {
+        fprintf(
+            ff,
+            "#!/bin/sh\n"
+            "# If component exited cleanly (exit 0), don't restart\n"
+            "if [ \"$1\" = \"0\" ]; then\n"
+            "  s6-svc -O %s\n"
+            "fi\n",
+            service_dir
+        );
+        fclose(ff);
+        chmod(finish_path, 0755);
+    }
     return GG_ERR_OK;
 }
 

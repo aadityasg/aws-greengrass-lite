@@ -73,12 +73,29 @@ static GgError stop_component(void *ctx, GgMap params, uint32_t handle) {
 
 static GgError get_status(void *ctx, GgMap params, uint32_t handle) {
     (void) ctx;
-    (void) params;
-    GG_LOGI("get_status called (stub).");
+    GgObject *name_obj;
+    GgError ret = gg_map_validate(
+        params,
+        GG_MAP_SCHEMA(
+            { GG_STR("component_name"), GG_REQUIRED, GG_TYPE_BUF, &name_obj },
+        )
+    );
+    if (ret != GG_ERR_OK) {
+        GG_LOGE("get_status received invalid arguments.");
+        return GG_ERR_INVALID;
+    }
+
+    GgBuffer name = gg_obj_into_buf(*name_obj);
+    GgBuffer state = { 0 };
+    ret = s6_get_status(name, &state);
+    if (ret != GG_ERR_OK) {
+        return ret;
+    }
+
     ggl_respond(
         handle,
         gg_obj_map(GG_MAP(
-            gg_kv(GG_STR("lifecycle_state"), gg_obj_buf(GG_STR("INSTALLED")))
+            gg_kv(GG_STR("lifecycle_state"), gg_obj_buf(state))
         ))
     );
     return GG_ERR_OK;

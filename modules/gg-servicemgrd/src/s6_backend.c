@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "s6_backend.h"
+#include "component_table.h"
 #include <gg/buffer.h>
 #include <gg/error.h>
 #include <gg/log.h>
@@ -11,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static GgError build_service_dir(
@@ -130,6 +132,7 @@ GgError s6_start_component(
         component_name.data,
         service_dir
     );
+    component_table_add(component_name);
     return GG_ERR_OK;
 }
 
@@ -175,5 +178,107 @@ GgError s6_stop_component(GgBuffer component_name) {
         component_name.data,
         service_dir
     );
+    component_table_remove(component_name);
+    return GG_ERR_OK;
+}
+
+GgError s6_get_status(GgBuffer component_name, GgBuffer *lifecycle_state) {
+    char service_dir[PATH_MAX];
+    GgError ret
+        = build_service_dir(component_name, service_dir, sizeof(service_dir));
+    if (ret != GG_ERR_OK) {
+        return ret;
+    }
+
+    if (access(service_dir, F_OK) != 0) {
+        *lifecycle_state = GG_STR("INSTALLED");
+        return GG_ERR_OK;
+    }
+
+    // Use s6-svstat parseable output: "up pid exitcode signal wantedup"
+    // We capture output by reading from a pipe
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        return GG_ERR_FAILURE;
+    }
+
+    pid_t child = fork();
+    if (child == 0) {
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+        execlp(
+            "s6-svstat",
+            "s6-svstat",
+            "-o",
+            "up,pid,exitcode,signal,wantedup",
+            service_dir,
+            NULL
+        );
+        _exit(1);
+    }
+    close(pipefd[1]);
+
+    char buf[256] = { 0 };
+    ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+    close(pipefd[0]);
+    waitpid(child, NULL, 0);
+
+    if (n <= 0) {
+        *lifecycle_state = GG_STR("INSTALLED");
+        return GG_ERR_OK;
+    }
+    buf[n] = '\0';
+
+    // Parse: "true 175 -1 NA true\n" or "false -1 0 NA false\n"
+    char up_str[8] = { 0 };
+    int pid_val = -1;
+    int exitcode = -1;
+    char signal_str[16] = { 0 };
+    char wantedup_str[8] = { 0 };
+    sscanf(buf, "%7s %d %d %15s %7s", up_str, &pid_val, &exitcode, signal_str, wantedup_str);
+
+    bool is_up = (strcmp(up_str, "true") == 0);
+    bool wanted_up = (strcmp(wantedup_str, "true") == 0);
+
+    struct component_entry *entry = component_table_get(component_name);
+
+    if (is_up && pid_val > 0) {
+        // Track transition from down→up as a restart
+        if (entry != NULL && !entry->was_up && entry->restart_count > 0) {
+            // Already counted the exit, just mark as up
+        }
+        if (entry != NULL) {
+            entry->was_up = true;
+        }
+        *lifecycle_state = GG_STR("RUNNING");
+        return GG_ERR_OK;
+    }
+
+    // Service is down
+    if (entry != NULL) {
+        if (entry->was_up) {
+            // Transitioned from up to down — record exit
+            component_table_record_exit(component_name);
+            entry->was_up = false;
+        }
+        if (entry->restart_count >= RESTART_LIMIT) {
+            *lifecycle_state = GG_STR("BROKEN");
+            return GG_ERR_OK;
+        }
+    }
+
+    if (wanted_up) {
+        // s6 will restart it — it's in an error/restart cycle
+        *lifecycle_state = GG_STR("ERRORED");
+        return GG_ERR_OK;
+    }
+
+    // Stopped intentionally
+    if (exitcode == 0) {
+        *lifecycle_state = GG_STR("FINISHED");
+    } else {
+        *lifecycle_state = GG_STR("ERRORED");
+    }
     return GG_ERR_OK;
 }

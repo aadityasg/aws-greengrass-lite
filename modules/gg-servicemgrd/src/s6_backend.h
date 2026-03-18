@@ -17,4 +17,6 @@ GgError s6_start_component(
 
 GgError s6_stop_component(GgBuffer component_name);
 
+GgError s6_get_status(GgBuffer component_name, GgBuffer *lifecycle_state);
+
 #endif

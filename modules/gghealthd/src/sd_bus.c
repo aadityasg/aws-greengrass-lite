@@ -56,6 +56,26 @@ GgError get_lifecycle_state(GgBuffer component_name, GgBuffer *state) {
     }
 
     *state = gg_obj_into_buf(*state_obj);
+
+    // Map to static string literals so the buffer outlives the arena
+    GgBuffer raw = gg_obj_into_buf(*state_obj);
+    if (gg_buffer_eq(raw, GG_STR("RUNNING"))) {
+        *state = GG_STR("RUNNING");
+    } else if (gg_buffer_eq(raw, GG_STR("FINISHED"))) {
+        *state = GG_STR("FINISHED");
+    } else if (gg_buffer_eq(raw, GG_STR("BROKEN"))) {
+        *state = GG_STR("BROKEN");
+    } else if (gg_buffer_eq(raw, GG_STR("ERRORED"))) {
+        *state = GG_STR("ERRORED");
+    } else if (gg_buffer_eq(raw, GG_STR("INSTALLED"))) {
+        *state = GG_STR("INSTALLED");
+    } else if (gg_buffer_eq(raw, GG_STR("STARTING"))) {
+        *state = GG_STR("STARTING");
+    } else if (gg_buffer_eq(raw, GG_STR("STOPPING"))) {
+        *state = GG_STR("STOPPING");
+    } else {
+        *state = GG_STR("ERRORED");
+    }
     return GG_ERR_OK;
 }
 

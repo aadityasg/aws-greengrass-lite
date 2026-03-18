@@ -2,275 +2,174 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// PoC: Replaced sd_bus_match_signal with ggl_subscribe to gg_supervisor.
+
 #include "subscriptions.h"
 #include "sd_bus.h"
-#include <assert.h>
-#include <errno.h>
 #include <gg/buffer.h>
-#include <gg/cleanup.h>
 #include <gg/error.h>
-#include <gg/file.h> // IWYU pragma: keep (TODO: remove after file.h refactor)
 #include <gg/log.h>
 #include <gg/map.h>
 #include <gg/object.h>
-#include <gg/utils.h>
+#include <gg/types.h>
+#include <ggl/core_bus/client.h>
 #include <ggl/core_bus/server.h>
-#include <ggl/nucleus/constants.h>
-#include <ggl/socket_server.h>
-#include <inttypes.h>
-#include <string.h>
-#include <systemd/sd-bus.h>
-#include <systemd/sd-event.h>
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
-#ifndef GGHEALTHD_MAX_SUBSCRIPIONS
 #define GGHEALTHD_MAX_SUBSCRIPTIONS 10
-#endif
 
-// SoA subscription layout
-static sd_bus_slot *slots[GGHEALTHD_MAX_SUBSCRIPTIONS];
-static uint32_t handles[GGHEALTHD_MAX_SUBSCRIPTIONS];
-static size_t component_names_len[GGHEALTHD_MAX_SUBSCRIPTIONS];
-static uint8_t component_names[GGHEALTHD_MAX_SUBSCRIPTIONS]
-                              [GGL_COMPONENT_NAME_MAX_LEN];
+static struct {
+    char component_name[128];
+    uint32_t gg_health_handle; // handle from the gg_health subscriber
+    uint32_t supervisor_handle; // handle from our subscription to gg_supervisor
+    bool active;
+} slots[GGHEALTHD_MAX_SUBSCRIPTIONS];
 
-static sd_bus *global_bus;
-
-static GgBuffer component_name_buf(int index) {
-    assert((index >= 0) && (index < GGHEALTHD_MAX_SUBSCRIPTIONS));
-    return gg_buffer_substr(
-        GG_BUF(component_names[index]), 0, component_names_len[index]
-    );
-}
-
-// Event loop thread functions //
-
-static int properties_changed_handler(
-    sd_bus_message *m, void *user_data, sd_bus_error *ret_error
+static GgError supervisor_response_callback(
+    void *ctx, uint32_t handle, GgObject data
 ) {
-    // index = &slots[index] - &slots[0]
-    ptrdiff_t index = ((sd_bus_slot **) user_data) - &slots[0];
-    if ((index < 0) || (index >= GGHEALTHD_MAX_SUBSCRIPTIONS)) {
-        GG_LOGE("Bogus index retrieved.");
-        sd_bus_error_set_errno(ret_error, -EINVAL);
-        return -1;
-    }
-    if (slots[index] == NULL) {
-        GG_LOGD("Signal received after unref.");
-        return -1;
-    }
-    uint32_t handle = handles[index];
-    if (handle == 0) {
-        GG_LOGD("Signal received after handle closed.");
-        return -1;
+    (void) handle;
+    int idx = (int) (intptr_t) ctx;
+    if (idx < 0 || idx >= GGHEALTHD_MAX_SUBSCRIPTIONS || !slots[idx].active) {
+        return GG_ERR_OK;
     }
 
-    GgBuffer component_name = component_name_buf((int) index);
-    sd_bus *bus = sd_bus_message_get_bus(m);
-    if (bus == NULL) {
-        GG_LOGW("No bus connection?");
+    // Forward the lifecycle state to the gg_health subscriber
+    if (gg_obj_type(data) != GG_TYPE_MAP) {
+        return GG_ERR_OK;
     }
 
-    const char *unit_path = sd_bus_message_get_path(m);
-    if (unit_path == NULL) {
-        GG_LOGD("Message has no path. Skipping signal.");
-        return 0;
-    }
-    GG_LOGD("Properties changed for %s", unit_path);
-
-    GgBuffer status = GG_STR("");
-    GgError ret = get_lifecycle_state(bus, unit_path, &status);
-    if (ret != GG_ERR_OK) {
-        return -1;
-    }
-
-    // RUNNING, FINISHED, BROKEN,  terminal states
-    if (gg_buffer_eq(GG_STR("BROKEN"), status)
-        || gg_buffer_eq(GG_STR("FINISHED"), status)
-        || gg_buffer_eq(GG_STR("RUNNING"), status)) {
-        GG_LOGI(
-            "%.*s finished their lifecycle (status=%.*s)",
-            (int) component_name.len,
-            component_name.data,
-            (int) status.len,
-            status.data
-        );
-        ggl_sub_respond(
-            handle,
-            gg_obj_map(GG_MAP(
-                gg_kv(GG_STR("component_name"), gg_obj_buf(component_name)),
-                gg_kv(GG_STR("lifecycle_state"), gg_obj_buf(status))
-            ))
-        );
-    } else {
-        GG_LOGD("Signalled for non-terminal state. ");
-    }
-
-    return 0;
-}
-
-static GgError register_dbus_signal(int index) {
-    GG_LOGD("Event loop thread enabling signal for %d.", index);
-    uint8_t qualified_name_bytes[SERVICE_NAME_MAX_LEN + 1];
-    GgBuffer qualified_name = GG_BUF(qualified_name_bytes);
-    GgBuffer component_name = component_name_buf(index);
-    GgError ret = get_service_name(component_name, &qualified_name);
-    if (ret != GG_ERR_OK) {
-        return ret;
-    }
-
-    sd_bus_message *reply = NULL;
-    const char *unit_path = NULL;
-    ret = get_unit_path(
-        global_bus, (const char *) qualified_name.data, &reply, &unit_path
+    GgObject *state_obj;
+    GgError ret = gg_map_validate(
+        gg_obj_into_map(data),
+        GG_MAP_SCHEMA(
+            { GG_STR("lifecycle_state"), GG_REQUIRED, GG_TYPE_BUF, &state_obj },
+        )
     );
-    GG_CLEANUP(sd_bus_message_unrefp, reply);
     if (ret != GG_ERR_OK) {
-        return ret;
+        return GG_ERR_OK;
     }
 
-    sd_bus_slot *slot = NULL;
-    int sd_err = sd_bus_match_signal(
-        global_bus,
-        &slot,
-        NULL,
-        unit_path,
-        "org.freedesktop.DBus.Properties",
-        "PropertiesChanged",
-        properties_changed_handler,
-        &slots[index]
+    GgBuffer state = gg_obj_into_buf(*state_obj);
+    GgBuffer name = { .data = (uint8_t *) slots[idx].component_name,
+                      .len = strlen(slots[idx].component_name) };
+
+    GG_LOGD(
+        "Forwarding lifecycle event: %s is %.*s.",
+        slots[idx].component_name,
+        (int) state.len,
+        state.data
     );
-    if (sd_err < 0) {
-        GG_LOGE(
-            "Failed to match signal (unit=%s) (errno=%d)", unit_path, -sd_err
-        );
-        return translate_dbus_call_error(sd_err);
-    }
-    slots[index] = slot;
-    GG_LOGD("Accepting subscription.");
-    ggl_sub_accept(
-        handles[index], gghealthd_unregister_lifecycle_subscription, NULL
+
+    ggl_sub_respond(
+        slots[idx].gg_health_handle,
+        gg_obj_map(GG_MAP(
+            gg_kv(GG_STR("component_name"), gg_obj_buf(name)),
+            gg_kv(GG_STR("lifecycle_state"), gg_obj_buf(state))
+        ))
     );
     return GG_ERR_OK;
 }
 
-static void unregister_dbus_signal(int index) {
-    GG_LOGD("Event loop thread disabling signal for %d.", index);
-    sd_bus_slot_unref(slots[index]);
-    slots[index] = NULL;
-    handles[index] = 0;
-    component_names_len[index] = 0;
-}
-
-static sd_event *sd_event_ctx;
-
-static void event_handle_callback(void) {
-    GG_LOGD("Event handle callback.");
-    int ret;
-    while ((ret = sd_event_run(sd_event_ctx, 0)) > 0) { }
-    GG_LOGD("Event loop returned %d.", ret);
-}
-
-void init_health_events(void) {
-    while (true) {
-        GgError ret = open_bus(&global_bus);
-        if (ret == GG_ERR_OK) {
-            break;
-        }
-        GG_LOGE("Failed to open bus.");
-        (void) gg_sleep(1);
+static void supervisor_close_callback(void *ctx, uint32_t handle) {
+    (void) handle;
+    int idx = (int) (intptr_t) ctx;
+    if (idx >= 0 && idx < GGHEALTHD_MAX_SUBSCRIPTIONS) {
+        GG_LOGD("Supervisor subscription closed for slot %d.", idx);
     }
-
-    do {
-        sd_bus_error error = SD_BUS_ERROR_NULL;
-        int sd_ret = sd_bus_call_method(
-            global_bus,
-            DEFAULT_DESTINATION,
-            DEFAULT_PATH,
-            MANAGER_INTERFACE,
-            "Subscribe",
-            &error,
-            NULL,
-            NULL
-        );
-        GG_CLEANUP(sd_bus_error_free, error);
-        if (sd_ret >= 0) {
-            break;
-        }
-        GG_LOGE(
-            "Failed to enable bus signals (errno=%d name=%s message=%s).",
-            -sd_ret,
-            error.name,
-            error.message
-        );
-        (void) gg_sleep(1);
-    } while (true);
-
-    sd_event *e = NULL;
-    while (true) {
-        int sd_ret = sd_event_new(&e);
-        if (sd_ret >= 0) {
-            break;
-        }
-        GG_LOGE("Failed to create event loop (errno=%d)", -sd_ret);
-        (void) gg_sleep(1);
-    }
-
-    int sd_ret = sd_bus_attach_event(global_bus, e, 0);
-    if (sd_ret < 0) {
-        GG_LOGE("Failed to attach bus event %p", (void *) global_bus);
-    }
-
-    // TODO: replace with setting up a larger epoll
-    sd_event_ctx = e;
-    ggl_socket_server_ext_fd = sd_event_get_fd(e);
-    ggl_socket_server_ext_handler = event_handle_callback;
-    GG_LOGD("sd_event_fd %d", ggl_socket_server_ext_fd);
-    event_handle_callback();
 }
-
-// core-bus functions //
 
 GgError gghealthd_register_lifecycle_subscription(
     GgBuffer component_name, uint32_t handle
 ) {
-    GG_LOGT(
-        "Registering watch on %.*s (handle=%" PRIu32 ")",
-        (int) component_name.len,
-        component_name.data,
-        handle
-    );
-
-    // find first free slot
-
-    int index = 0;
-    for (; index < GGHEALTHD_MAX_SUBSCRIPTIONS; ++index) {
-        if (handles[index] == 0) {
+    // Find free slot
+    int idx = -1;
+    for (int i = 0; i < GGHEALTHD_MAX_SUBSCRIPTIONS; i++) {
+        if (!slots[i].active) {
+            idx = i;
             break;
         }
     }
-    if (index == GGHEALTHD_MAX_SUBSCRIPTIONS) {
-        GG_LOGE("Unable to find open subscription slot.");
+    if (idx < 0) {
+        GG_LOGW("Subscription table full.");
         return GG_ERR_NOMEM;
     }
 
-    GG_LOGT("Initializing subscription (index=%d).", index);
-    memcpy(component_names[index], component_name.data, component_name.len);
-    component_names_len[index] = component_name.len;
-    handles[index] = handle;
-    GgError ret = register_dbus_signal(index);
-    return ret;
+    // Accept the gg_health subscription
+    ggl_sub_accept(
+        handle, gghealthd_unregister_lifecycle_subscription, NULL
+    );
+
+    // Check if already in terminal state — send immediate response
+    GgBuffer state = { 0 };
+    GgError ret = get_lifecycle_state(component_name, &state);
+    if (ret == GG_ERR_OK) {
+        if (gg_buffer_eq(state, GG_STR("RUNNING"))
+            || gg_buffer_eq(state, GG_STR("FINISHED"))
+            || gg_buffer_eq(state, GG_STR("BROKEN"))) {
+            ggl_sub_respond(
+                handle,
+                gg_obj_map(GG_MAP(
+                    gg_kv(
+                        GG_STR("component_name"), gg_obj_buf(component_name)
+                    ),
+                    gg_kv(GG_STR("lifecycle_state"), gg_obj_buf(state))
+                ))
+            );
+            return GG_ERR_OK;
+        }
+    }
+
+    // Subscribe to gg_supervisor for lifecycle events
+    size_t copy_len = component_name.len < sizeof(slots[idx].component_name) - 1
+        ? component_name.len
+        : sizeof(slots[idx].component_name) - 1;
+    memcpy(slots[idx].component_name, component_name.data, copy_len);
+    slots[idx].component_name[copy_len] = '\0';
+    slots[idx].gg_health_handle = handle;
+    slots[idx].active = true;
+
+    GgError sub_error;
+    ret = ggl_subscribe(
+        GG_STR("gg_supervisor"),
+        GG_STR("subscribe_to_lifecycle"),
+        GG_MAP(
+            gg_kv(GG_STR("component_name"), gg_obj_buf(component_name))
+        ),
+        supervisor_response_callback,
+        supervisor_close_callback,
+        (void *) (intptr_t) idx,
+        &sub_error,
+        &slots[idx].supervisor_handle
+    );
+    if (ret != GG_ERR_OK) {
+        GG_LOGE(
+            "Failed to subscribe to gg_supervisor for %.*s.",
+            (int) component_name.len,
+            component_name.data
+        );
+        slots[idx].active = false;
+        return ret;
+    }
+
+    return GG_ERR_OK;
 }
 
 void gghealthd_unregister_lifecycle_subscription(void *ctx, uint32_t handle) {
-    GG_LOGT("Unregistering %" PRIu32, handle);
     (void) ctx;
-    for (int index = 0; index < GGHEALTHD_MAX_SUBSCRIPTIONS; ++index) {
-        if (handles[index] == handle) {
-            GG_LOGT("Found handle (index=%d).", index);
-            unregister_dbus_signal(index);
+    for (int i = 0; i < GGHEALTHD_MAX_SUBSCRIPTIONS; i++) {
+        if (slots[i].active && slots[i].gg_health_handle == handle) {
+            ggl_client_sub_close(slots[i].supervisor_handle);
+            slots[i].active = false;
+            GG_LOGD("Unregistered lifecycle subscription for %s.", slots[i].component_name);
+            return;
         }
     }
+}
+
+void init_health_events(void) {
+    // PoC: no sd_event loop needed — subscriptions go through coreBus
+    GG_LOGD("init_health_events: using coreBus subscriptions (no sd_event).");
 }

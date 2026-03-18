@@ -8,4 +8,5 @@ ggl_init_module(
        ggl-common
        ggl-process
        core-bus
+       core-bus-sub-response
        ggl-socket-server)

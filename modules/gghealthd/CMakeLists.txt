@@ -10,5 +10,4 @@ ggl_init_module(
        ggl-constants
        core-bus
        ggl-socket-server
-       core-bus-gg-config
-       PkgConfig::libsystemd)
+       core-bus-gg-config)

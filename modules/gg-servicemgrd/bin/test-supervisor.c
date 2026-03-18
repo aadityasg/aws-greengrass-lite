@@ -8,8 +8,29 @@
 #include <gg/object.h>
 #include <gg/types.h>
 #include <ggl/core_bus/client.h>
+#include <ggl/core_bus/sub_response.h>
 #include <stdio.h>
 #include <string.h>
+
+static GgError subscribe_callback(void *ctx, GgObject data) {
+    (void) ctx;
+    if (gg_obj_type(data) != GG_TYPE_MAP) {
+        printf("(non-map response)\n");
+        return GG_ERR_OK;
+    }
+    GgObject *state_obj;
+    GgError ret = gg_map_validate(
+        gg_obj_into_map(data),
+        GG_MAP_SCHEMA(
+            { GG_STR("lifecycle_state"), GG_REQUIRED, GG_TYPE_BUF, &state_obj },
+        )
+    );
+    if (ret == GG_ERR_OK) {
+        GgBuffer state = gg_obj_into_buf(*state_obj);
+        printf("SUBSCRIPTION: %.*s\n", (int) state.len, state.data);
+    }
+    return GG_ERR_OK;
+}
 
 int main(int argc, char **argv) {
     if (argc < 3) {
@@ -93,6 +114,23 @@ int main(int argc, char **argv) {
             &error,
             &alloc,
             &result
+        );
+        if (ret == GG_ERR_OK) {
+            printf("OK\n");
+        }
+    } else if (strcmp(method, "subscribe") == 0) {
+        printf("Subscribing to lifecycle for %s (10s timeout)...\n", comp);
+        GgError sub_error;
+        ret = ggl_sub_response(
+            GG_STR("gg_supervisor"),
+            GG_STR("subscribe_to_lifecycle"),
+            GG_MAP(
+                gg_kv(GG_STR("component_name"), gg_obj_buf(comp_buf))
+            ),
+            subscribe_callback,
+            NULL,
+            &sub_error,
+            10
         );
         if (ret == GG_ERR_OK) {
             printf("OK\n");

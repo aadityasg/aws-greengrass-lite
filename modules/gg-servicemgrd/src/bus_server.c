@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "s6_backend.h"
+#include "subscriptions.h"
 #include <servicemgrd.h>
 #include <gg/buffer.h>
 #include <gg/error.h>
@@ -105,13 +106,24 @@ static GgError subscribe_to_lifecycle(
     void *ctx, GgMap params, uint32_t handle
 ) {
     (void) ctx;
-    (void) params;
-    (void) handle;
-    GG_LOGW("subscribe_to_lifecycle not yet implemented.");
-    return GG_ERR_UNSUPPORTED;
+    GgObject *name_obj;
+    GgError ret = gg_map_validate(
+        params,
+        GG_MAP_SCHEMA(
+            { GG_STR("component_name"), GG_REQUIRED, GG_TYPE_BUF, &name_obj },
+        )
+    );
+    if (ret != GG_ERR_OK) {
+        GG_LOGE("subscribe_to_lifecycle received invalid arguments.");
+        return GG_ERR_INVALID;
+    }
+
+    GgBuffer name = gg_obj_into_buf(*name_obj);
+    return subscriptions_add(name, handle);
 }
 
 GgError run_servicemgrd(void) {
+    subscriptions_init();
     static GglRpcMethodDesc handlers[]
         = { { GG_STR("start_component"), false, start_component, NULL },
             { GG_STR("stop_component"), false, stop_component, NULL },

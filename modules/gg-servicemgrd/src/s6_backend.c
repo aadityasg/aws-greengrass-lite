@@ -49,7 +49,10 @@ static GgError write_run_script(
     }
     fprintf(
         f,
-        "#!/bin/sh\nexec recipe-runner -n %.*s -v %.*s -p %.*s\n",
+        "#!/bin/sh\n"
+        "export AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT="
+        "/var/lib/greengrass/gg-ipc.socket\n"
+        "exec recipe-runner -n %.*s -v %.*s -p %.*s\n",
         (int) component_name.len,
         component_name.data,
         (int) version.len,
@@ -244,11 +247,16 @@ GgError s6_get_status(GgBuffer component_name, GgBuffer *lifecycle_state) {
     struct component_entry *entry = component_table_get(component_name);
 
     if (is_up && pid_val > 0) {
-        // Track transition from down→up as a restart
-        if (entry != NULL && !entry->was_up && entry->restart_count > 0) {
-            // Already counted the exit, just mark as up
-        }
+        // Detect restart by PID change
         if (entry != NULL) {
+            if (entry->last_pid > 0 && entry->last_pid != pid_val) {
+                component_table_record_exit(component_name);
+                if (entry->restart_count >= RESTART_LIMIT) {
+                    *lifecycle_state = GG_STR("BROKEN");
+                    return GG_ERR_OK;
+                }
+            }
+            entry->last_pid = pid_val;
             entry->was_up = true;
         }
         *lifecycle_state = GG_STR("RUNNING");

@@ -19,6 +19,7 @@ void component_table_add(GgBuffer name) {
             table[i].restart_count = 0;
             table[i].restart_window_start = time(NULL);
             table[i].was_up = false;
+            table[i].last_pid = -1;
             return;
         }
     }
@@ -35,6 +36,7 @@ void component_table_add(GgBuffer name) {
             table[i].restart_count = 0;
             table[i].restart_window_start = time(NULL);
             table[i].was_up = false;
+            table[i].last_pid = -1;
             return;
         }
     }

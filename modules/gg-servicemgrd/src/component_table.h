@@ -19,6 +19,7 @@ struct component_entry {
     int restart_count;
     time_t restart_window_start;
     bool was_up;
+    int last_pid;
 };
 
 void component_table_add(GgBuffer name);

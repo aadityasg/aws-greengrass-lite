@@ -8,3 +8,5 @@ services:
       runWithDefault:
         posixUser: "gg_component:gg_component"
       greengrassDataPlanePort: "8443"
+      fleetStatus:
+        periodicStatusPublishIntervalSeconds: 120

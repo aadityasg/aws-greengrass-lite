@@ -44,6 +44,7 @@
 #include <ggl/process.h>
 #include <ggl/recipe.h>
 #include <ggl/recipe2unit.h>
+#include <ggl/core_bus/client.h>
 #include <ggl/semver.h>
 #include <ggl/uri.h>
 #include <ggl/zip.h>
@@ -59,6 +60,36 @@
 #define DEPLOYMENT_TARGET_NAME_MAX_CHARS 128
 #define MAX_DEPLOYMENT_TARGETS 100
 #define MQTT_CONNECTIVITY_CHECK_TIMEOUT_SECONDS 60
+
+static GgError supervisor_start_component(
+    GgBuffer name, GgBuffer version, GgBuffer phase
+) {
+    uint8_t alloc_mem[256];
+    GgArena alloc
+        = gg_arena_init((GgBuffer) { .data = alloc_mem, .len = sizeof(alloc_mem) });
+    GgObject result;
+    GgError error;
+    GgError ret = ggl_call(
+        GG_STR("gg_supervisor"),
+        GG_STR("start_component"),
+        GG_MAP(
+            gg_kv(GG_STR("component_name"), gg_obj_buf(name)),
+            gg_kv(GG_STR("version"), gg_obj_buf(version)),
+            gg_kv(GG_STR("phase"), gg_obj_buf(phase))
+        ),
+        &error,
+        &alloc,
+        &result
+    );
+    if (ret != GG_ERR_OK) {
+        GG_LOGE(
+            "Failed to start component %.*s via gg_supervisor.",
+            (int) name.len,
+            name.data
+        );
+    }
+    return ret;
+}
 
 static struct DeploymentConfiguration {
     char data_endpoint[128];
@@ -3489,114 +3520,13 @@ static void handle_deployment(
                         return;
                     }
 
-                    // initiate link command for 'install'
-                    static uint8_t link_command_buf[PATH_MAX];
-                    GgByteVec link_command_vec = GG_BYTE_VEC(link_command_buf);
-                    ret = gg_byte_vec_append(
-                        &link_command_vec, GG_STR("systemctl link ")
-                    );
-                    gg_byte_vec_chain_append(
-                        &ret,
-                        &link_command_vec,
-                        install_service_file_path_vec.buf
-                    );
-                    gg_byte_vec_chain_push(&ret, &link_command_vec, '\0');
-                    if (ret != GG_ERR_OK) {
-                        GG_LOGE(
-                            "Failed to create systemctl link command for:%.*s",
-                            (int) install_service_file_path_vec.buf.len,
-                            install_service_file_path_vec.buf.data
-                        );
-                        return;
-                    }
-
-                    GG_LOGD(
-                        "Command to execute: %.*s",
-                        (int) link_command_vec.buf.len,
-                        link_command_vec.buf.data
-                    );
-
-                    // NOLINTBEGIN(concurrency-mt-unsafe)
-                    int system_ret = system((char *) link_command_vec.buf.data);
-                    if (WIFEXITED(system_ret)) {
-                        if (WEXITSTATUS(system_ret) != 0) {
-                            GG_LOGE(
-                                "systemctl link failed for:%.*s",
-                                (int) install_service_file_path_vec.buf.len,
-                                install_service_file_path_vec.buf.data
-                            );
-                            return;
-                        }
-                        GG_LOGI(
-                            "systemctl link exited for %.*s with child status %d\n",
-                            (int) install_service_file_path_vec.buf.len,
-                            install_service_file_path_vec.buf.data,
-                            WEXITSTATUS(system_ret)
-                        );
-                    } else {
-                        GG_LOGE(
-                            "systemctl link did not exit normally for %.*s",
-                            (int) install_service_file_path_vec.buf.len,
-                            install_service_file_path_vec.buf.data
-                        );
-                        return;
-                    }
-
-                    // initiate start command for 'install' (non-blocking to
-                    // allow wait_for_phase_status to handle retries via
-                    // gghealthd)
-                    static uint8_t start_command_buf[PATH_MAX];
-                    GgByteVec start_command_vec
-                        = GG_BYTE_VEC(start_command_buf);
-                    ret = gg_byte_vec_append(
-                        &start_command_vec,
-                        GG_STR("systemctl start --no-block ")
-                    );
-                    gg_byte_vec_chain_append(
-                        &ret, &start_command_vec, GG_STR("ggl.")
-                    );
-                    gg_byte_vec_chain_append(
-                        &ret, &start_command_vec, component_name
-                    );
-                    gg_byte_vec_chain_append(
-                        &ret, &start_command_vec, GG_STR(".install.service\0")
-                    );
-
-                    GG_LOGD(
-                        "Command to execute: %.*s",
-                        (int) start_command_vec.buf.len,
-                        start_command_vec.buf.data
+                    // PoC: start install phase via gg-servicemgrd
+                    GgBuffer comp_version
+                        = gg_obj_into_buf(*gg_kv_val(component));
+                    ret = supervisor_start_component(
+                        component_name, comp_version, GG_STR("install")
                     );
                     if (ret != GG_ERR_OK) {
-                        GG_LOGE(
-                            "Failed to create systemctl start command for %.*s",
-                            (int) install_service_file_path_vec.buf.len,
-                            install_service_file_path_vec.buf.data
-                        );
-                        return;
-                    }
-
-                    system_ret = system((char *) start_command_vec.buf.data);
-                    // NOLINTEND(concurrency-mt-unsafe)
-                    if (WIFEXITED(system_ret)) {
-                        if (WEXITSTATUS(system_ret) != 0) {
-                            GG_LOGE(
-                                "systemctl start --no-block failed for %.*s",
-                                (int) install_service_file_path_vec.buf.len,
-                                install_service_file_path_vec.buf.data
-                            );
-                            return;
-                        }
-                        GG_LOGI(
-                            "systemctl start --no-block exited with child status %d\n",
-                            WEXITSTATUS(system_ret)
-                        );
-                    } else {
-                        GG_LOGE(
-                            "systemctl start --no-block did not exit normally for %.*s",
-                            (int) install_service_file_path_vec.buf.len,
-                            install_service_file_path_vec.buf.data
-                        );
                         return;
                     }
                 }
@@ -3645,77 +3575,12 @@ static void handle_deployment(
                     GG_CLEANUP(cleanup_close, fd);
                     (void
                     ) disable_and_unlink_service(&component_name, RUN_STARTUP);
-                    // run link command
-                    static uint8_t link_command_buf[PATH_MAX];
-                    GgByteVec link_command_vec = GG_BYTE_VEC(link_command_buf);
-                    ret = gg_byte_vec_append(
-                        &link_command_vec, GG_STR("systemctl link ")
+
+                    // PoC: start run phase via gg-servicemgrd
+                    ret = supervisor_start_component(
+                        component_name, component_version, GG_STR("run")
                     );
-                    gg_byte_vec_chain_append(
-                        &ret, &link_command_vec, service_file_path_vec.buf
-                    );
-                    gg_byte_vec_chain_push(&ret, &link_command_vec, '\0');
                     if (ret != GG_ERR_OK) {
-                        GG_LOGE("Failed to create systemctl link command.");
-                        return;
-                    }
-
-                    GG_LOGD(
-                        "Command to execute: %.*s",
-                        (int) link_command_vec.buf.len,
-                        link_command_vec.buf.data
-                    );
-
-                    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-                    int system_ret = system((char *) link_command_vec.buf.data);
-                    if (WIFEXITED(system_ret)) {
-                        if (WEXITSTATUS(system_ret) != 0) {
-                            GG_LOGE("systemctl link command failed");
-                            return;
-                        }
-                        GG_LOGI(
-                            "systemctl link exited with child status %d\n",
-                            WEXITSTATUS(system_ret)
-                        );
-                    } else {
-                        GG_LOGE("systemctl link did not exit normally");
-                        return;
-                    }
-
-                    // run enable command
-                    static uint8_t enable_command_buf[PATH_MAX];
-                    GgByteVec enable_command_vec
-                        = GG_BYTE_VEC(enable_command_buf);
-                    ret = gg_byte_vec_append(
-                        &enable_command_vec, GG_STR("systemctl enable ")
-                    );
-                    gg_byte_vec_chain_append(
-                        &ret, &enable_command_vec, service_file_path_vec.buf
-                    );
-                    gg_byte_vec_chain_push(&ret, &enable_command_vec, '\0');
-                    if (ret != GG_ERR_OK) {
-                        GG_LOGE("Failed to create systemctl enable command.");
-                        return;
-                    }
-                    GG_LOGD(
-                        "Command to execute: %.*s",
-                        (int) enable_command_vec.buf.len,
-                        enable_command_vec.buf.data
-                    );
-
-                    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-                    system_ret = system((char *) enable_command_vec.buf.data);
-                    if (WIFEXITED(system_ret)) {
-                        if (WEXITSTATUS(system_ret) != 0) {
-                            GG_LOGE("systemctl enable failed");
-                            return;
-                        }
-                        GG_LOGI(
-                            "systemctl enable exited with child status %d\n",
-                            WEXITSTATUS(system_ret)
-                        );
-                    } else {
-                        GG_LOGE("systemctl enable did not exit normally");
                         return;
                     }
                 }
@@ -3730,39 +3595,10 @@ static void handle_deployment(
             }
         }
 
-        // run daemon-reload command once all the files are linked
-        static uint8_t reload_command_buf[PATH_MAX];
-        GgByteVec reload_command_vec = GG_BYTE_VEC(reload_command_buf);
-        ret = gg_byte_vec_append(
-            &reload_command_vec, GG_STR("systemctl daemon-reload\0")
-        );
-        if (ret != GG_ERR_OK) {
-            GG_LOGE("Failed to create systemctl daemon-reload command.");
-            return;
-        }
-        // NOLINTNEXTLINE(concurrency-mt-unsafe)
-        int system_ret = system((char *) reload_command_vec.buf.data);
-        if (WIFEXITED(system_ret)) {
-            if (WEXITSTATUS(system_ret) != 0) {
-                GG_LOGE("systemctl daemon-reload failed");
-                return;
-            }
-            GG_LOGI(
-                "systemctl daemon-reload exited with child status %d\n",
-                WEXITSTATUS(system_ret)
-            );
-        } else {
-            GG_LOGE("systemctl daemon-reload did not exit normally");
-            return;
-        }
+        // PoC: no daemon-reload needed — gg-servicemgrd handles activation
     }
 
-    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-    int system_ret = system("systemctl reset-failed");
-    (void) (system_ret);
-    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-    system_ret = system("systemctl start greengrass-lite.target");
-    (void) (system_ret);
+    // PoC: no systemctl reset-failed or start target needed
 
     ret = wait_for_deployment_status(resolved_components_kv_vec.map);
     if (ret != GG_ERR_OK) {

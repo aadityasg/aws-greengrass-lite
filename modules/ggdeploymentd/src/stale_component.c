@@ -16,6 +16,7 @@
 #include <gg/object.h>
 #include <gg/vector.h>
 #include <ggl/core_bus/gg_config.h>
+#include <ggl/core_bus/client.h>
 #include <ggl/docker_artifact_cleanup.h>
 #include <limits.h>
 #include <string.h>
@@ -333,180 +334,31 @@ static GgError delete_recipe_script_and_service_files(GgBuffer *component_name
 GgError disable_and_unlink_service(
     GgBuffer *component_name, PhaseSelection phase
 ) {
-    static uint8_t command_array[PATH_MAX];
-    GgByteVec command_vec = GG_BYTE_VEC(command_array);
-
-    GgError ret = gg_byte_vec_append(&command_vec, GG_STR("systemctl stop "));
-    gg_byte_vec_chain_append(&ret, &command_vec, GG_STR("ggl."));
-    gg_byte_vec_chain_append(&ret, &command_vec, *component_name);
-    if (phase == INSTALL) {
-        gg_byte_vec_chain_append(&ret, &command_vec, GG_STR(".install"));
-    } else if (phase == BOOTSTRAP) {
-        gg_byte_vec_chain_append(&ret, &command_vec, GG_STR(".bootstrap"));
-    } else {
-        // Incase of startup/run nothing to append
-        assert(phase == RUN_STARTUP);
-    }
-    gg_byte_vec_chain_append(&ret, &command_vec, GG_STR(".service"));
-    gg_byte_vec_chain_push(&ret, &command_vec, '\0');
-    if (ret != GG_ERR_OK) {
-        GG_LOGE("Failed to create systemctl stop command.");
-        return ret;
-    }
-
-    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-    int system_ret = system((char *) command_vec.buf.data);
-    if (WIFEXITED(system_ret)) {
-        if (WEXITSTATUS(system_ret) != 0) {
-            GG_LOGD("systemctl stop failed");
-        }
-        GG_LOGI(
-            "systemctl stop exited with child status %d\n",
-            WEXITSTATUS(system_ret)
-        );
-    } else {
-        GG_LOGE("systemctl stop did not exit normally");
-    }
-
-    memset(command_array, 0, sizeof(command_array));
-    command_vec.buf.len = 0;
-
-    ret = gg_byte_vec_append(&command_vec, GG_STR("systemctl disable "));
-    gg_byte_vec_chain_append(&ret, &command_vec, GG_STR("ggl."));
-    gg_byte_vec_chain_append(&ret, &command_vec, *component_name);
-    gg_byte_vec_chain_append(&ret, &command_vec, GG_STR(".service"));
-    gg_byte_vec_chain_push(&ret, &command_vec, '\0');
-    if (ret != GG_ERR_OK) {
-        GG_LOGE("Failed to create systemctl disable command.");
-        return ret;
-    }
-
-    // TODO: replace system call with platform independent function.
-    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-    system_ret = system((char *) command_vec.buf.data);
-    if (WIFEXITED(system_ret)) {
-        if (WEXITSTATUS(system_ret) != 0) {
-            GG_LOGD("systemctl disable failed");
-        }
-        GG_LOGI(
-            "systemctl disable exited with child status %d\n",
-            WEXITSTATUS(system_ret)
-        );
-    } else {
-        GG_LOGE("systemctl disable did not exit normally");
-    }
-
-    memset(command_array, 0, sizeof(command_array));
-    command_vec.buf.len = 0;
-
-    // TODO: replace this with a better approach such as 'unlink'.
-    ret = gg_byte_vec_append(&command_vec, GG_STR("rm /etc/systemd/system/"));
-    gg_byte_vec_chain_append(&ret, &command_vec, GG_STR("ggl."));
-    gg_byte_vec_chain_append(&ret, &command_vec, *component_name);
-    gg_byte_vec_chain_append(&ret, &command_vec, GG_STR(".service"));
-    gg_byte_vec_chain_push(&ret, &command_vec, '\0');
-    if (ret != GG_ERR_OK) {
-        GG_LOGE("Failed to create rm /etc/systemd/system/[service] command.");
-        return ret;
-    }
-
-    // TODO: replace system call with platform independent function.
-    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-    system_ret = system((char *) command_vec.buf.data);
-    if (WIFEXITED(system_ret)) {
-        if (WEXITSTATUS(system_ret) != 0) {
-            GG_LOGD("removing symlink failed");
-        }
-        GG_LOGI(
-            "rm /etc/systemd/system/[service] exited with child status %d\n",
-            WEXITSTATUS(system_ret)
-        );
-    } else {
-        GG_LOGE("rm /etc/systemd/system/[service] did not exit normally");
-    }
-
-    memset(command_array, 0, sizeof(command_array));
-    command_vec.buf.len = 0;
-
-    // TODO: replace this with a better approach such as 'unlink'.
-    ret = gg_byte_vec_append(
-        &command_vec, GG_STR("rm /usr/lib/systemd/system/")
+    (void) phase;
+    // PoC: route through gg-servicemgrd instead of systemctl
+    uint8_t alloc_mem[256];
+    GgArena alloc
+        = gg_arena_init((GgBuffer) { .data = alloc_mem, .len = sizeof(alloc_mem) });
+    GgObject result;
+    GgError error;
+    GgError ret = ggl_call(
+        GG_STR("gg_supervisor"),
+        GG_STR("stop_component"),
+        GG_MAP(
+            gg_kv(GG_STR("component_name"), gg_obj_buf(*component_name))
+        ),
+        &error,
+        &alloc,
+        &result
     );
-    gg_byte_vec_chain_append(&ret, &command_vec, GG_STR("ggl."));
-    gg_byte_vec_chain_append(&ret, &command_vec, *component_name);
-    gg_byte_vec_chain_append(&ret, &command_vec, GG_STR(".service"));
-    gg_byte_vec_chain_push(&ret, &command_vec, '\0');
     if (ret != GG_ERR_OK) {
-        GG_LOGE("Failed to create rm /usr/lib/systemd/system/[service] command."
+        GG_LOGD(
+            "stop_component via gg_supervisor returned %d for %.*s",
+            ret,
+            (int) component_name->len,
+            component_name->data
         );
-        return ret;
     }
-
-    // TODO: replace system call with platform independent function.
-    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-    system_ret = system((char *) command_vec.buf.data);
-    if (WIFEXITED(system_ret)) {
-        if (WEXITSTATUS(system_ret) != 0) {
-            GG_LOGD("removing symlink failed");
-        }
-        GG_LOGI(
-            "rm /usr/lib/systemd/system/[service] exited with child status %d\n",
-            WEXITSTATUS(system_ret)
-        );
-    } else {
-        GG_LOGE("rm /usr/lib/systemd/system/[service] did not exit normally");
-    }
-
-    memset(command_array, 0, sizeof(command_array));
-    command_vec.buf.len = 0;
-
-    ret = gg_byte_vec_append(&command_vec, GG_STR("systemctl daemon-reload"));
-    gg_byte_vec_chain_push(&ret, &command_vec, '\0');
-    if (ret != GG_ERR_OK) {
-        GG_LOGE("Failed to create systemctl daemon-reload command.");
-        return ret;
-    }
-
-    // TODO: replace system call with platform independent function.
-    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-    system_ret = system((char *) command_vec.buf.data);
-    if (WIFEXITED(system_ret)) {
-        if (WEXITSTATUS(system_ret) != 0) {
-            GG_LOGE("systemctl daemon-reload failed");
-        }
-        GG_LOGI(
-            "systemctl daemon-reload exited with child status %d\n",
-            WEXITSTATUS(system_ret)
-        );
-    } else {
-        GG_LOGE("systemctl daemon-reload did not exit normally");
-    }
-
-    memset(command_array, 0, sizeof(command_array));
-    command_vec.buf.len = 0;
-
-    ret = gg_byte_vec_append(&command_vec, GG_STR("systemctl reset-failed"));
-    gg_byte_vec_chain_push(&ret, &command_vec, '\0');
-    if (ret != GG_ERR_OK) {
-        GG_LOGE("Failed to create systemctl reset-failed command.");
-        return ret;
-    }
-
-    // TODO: replace system call with platform independent function.
-    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-    system_ret = system((char *) command_vec.buf.data);
-    if (WIFEXITED(system_ret)) {
-        if (WEXITSTATUS(system_ret) != 0) {
-            GG_LOGE("systemctl reset-failed failed");
-        }
-        GG_LOGI(
-            "systemctl reset-failed exited with child status %d\n",
-            WEXITSTATUS(system_ret)
-        );
-    } else {
-        GG_LOGE("systemctl reset-failed did not exit normally");
-    }
-
     return GG_ERR_OK;
 }
 

@@ -1,0 +1,40 @@
+{
+  "RecipeFormatVersion": "2020-01-25",
+  "ComponentName": "com.demo.SensorSim",
+  "ComponentVersion": "1.0.0",
+  "ComponentDescription": "Simulated sensor for GenAI edge-to-cloud demo",
+  "ComponentPublisher": "Amazon",
+  "ComponentConfiguration": {
+    "DefaultConfiguration": {
+      "mode": "normal",
+      "accessControl": {
+        "aws.greengrass.ipc.mqttproxy": {
+          "com.demo.SensorSim:mqttproxy:1": {
+            "policyDescription": "Allows publish to demo telemetry topic",
+            "operations": ["aws.greengrass#PublishToIoTCore"],
+            "resources": ["ggl/demo/*"]
+          }
+        }
+      }
+    }
+  },
+  "Manifests": [
+    {
+      "Platform": {
+        "os": "linux",
+        "runtime": "*"
+      },
+      "Lifecycle": {
+        "run": "{artifacts:path}/sensor_sim"
+      },
+      "Artifacts": [
+        {
+          "URI": "s3://aadity-gg-lite-deployment-artifacts/artifacts/com.demo.SensorSim/1.0.0/sensor_sim",
+          "Permission": {
+            "Execute": "OWNER"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -9,11 +9,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 
+static volatile int running = 1;
 static int low_power = 0;
 static double temp = 25.0;
+
+static void sighandler(int sig) {
+    (void) sig;
+    running = 0;
+}
 
 static void on_config_update(
     void *ctx,
@@ -66,10 +73,13 @@ int main(void) {
         on_config_update, NULL, &handle
     );
 
+    signal(SIGTERM, sighandler);
+    signal(SIGINT, sighandler);
+
     fprintf(stderr, "Sensor sim started. mode=%s\n",
         low_power ? "low-power" : "normal");
 
-    while (1) {
+    while (running) {
         if (low_power) {
             if (temp > 30.0) temp -= 0.5;
         } else {

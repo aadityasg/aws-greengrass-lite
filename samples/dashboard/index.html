@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GGL Edge-to-Cloud GenAI Demo</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0a0e17; color: #e0e0e0; }
+  .header { background: #131a2b; padding: 20px 30px; border-bottom: 1px solid #1e2a3a; display: flex; justify-content: space-between; align-items: center; }
+  .header h1 { font-size: 20px; color: #58a6ff; }
+  .header .status { display: flex; gap: 15px; align-items: center; }
+  .badge { padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .badge.green { background: #1a3a2a; color: #4ade80; }
+  .badge.red { background: #3a1a1a; color: #f87171; }
+  .badge.blue { background: #1a2a3a; color: #60a5fa; }
+  .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; padding: 20px; height: calc(100vh - 80px); }
+  .card { background: #131a2b; border-radius: 12px; padding: 20px; border: 1px solid #1e2a3a; }
+  .card h2 { font-size: 14px; color: #8b95a5; margin-bottom: 15px; text-transform: uppercase; letter-spacing: 1px; }
+  .right { display: flex; flex-direction: column; gap: 20px; }
+  .insight { background: #1a1a2e; border-left: 3px solid #f59e0b; padding: 12px; margin-bottom: 10px; border-radius: 0 8px 8px 0; font-size: 13px; line-height: 1.5; }
+  .insight .meta { color: #6b7280; font-size: 11px; margin-top: 6px; }
+  .btn { background: #2563eb; color: white; border: none; padding: 14px 28px; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; width: 100%; transition: all 0.2s; }
+  .btn:hover { background: #1d4ed8; }
+  .btn:disabled { background: #374151; cursor: not-allowed; }
+  .btn.deployed { background: #16a34a; }
+  .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
+  .metric { background: #0a0e17; padding: 12px; border-radius: 8px; text-align: center; }
+  .metric .value { font-size: 28px; font-weight: 700; }
+  .metric .label { font-size: 11px; color: #6b7280; margin-top: 4px; }
+  .temp-high { color: #f87171; }
+  .temp-normal { color: #4ade80; }
+  #insights-list { overflow-y: auto; max-height: 300px; }
+  .no-systemd { font-size: 11px; color: #f59e0b; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>🔧 Greengrass Lite — Edge-to-Cloud GenAI Demo</h1>
+    <div class="no-systemd">Device: cam-3 | Runtime: s6 (no systemd) | Architecture: armv7 BusyBox</div>
+  </div>
+  <div class="status">
+    <span class="badge blue">s6-svscan</span>
+    <span class="badge green" id="mqtt-badge">MQTT Connected</span>
+    <span class="badge" id="mode-badge">Normal</span>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>📊 Device Telemetry — Temperature</h2>
+    <div class="metrics">
+      <div class="metric"><div class="value" id="current-temp">--</div><div class="label">Current °C</div></div>
+      <div class="metric"><div class="value" id="current-humidity">--</div><div class="label">Humidity %</div></div>
+    </div>
+    <canvas id="tempChart" height="120"></canvas>
+  </div>
+
+  <div class="right">
+    <div class="card">
+      <h2>🤖 AI Insights (Bedrock)</h2>
+      <div id="insights-list"><em style="color:#6b7280">Loading...</em></div>
+    </div>
+    <div class="card">
+      <h2>🚀 Remote Action</h2>
+      <p style="font-size:13px;color:#8b95a5;margin-bottom:12px;">Deploy a config update to switch the device to low-power mode, reducing temperature.</p>
+      <button class="btn" id="fix-btn" onclick="deployMode('low-power')">⚡ Deploy Low-Power Mode</button>
+      <button class="btn" id="reset-btn" onclick="deployMode('normal')" style="margin-top:8px;background:#6b7280;">🔄 Reset to Normal</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = "https://0pqbjay79l.execute-api.us-west-2.amazonaws.com";
+
+const ctx = document.getElementById("tempChart").getContext("2d");
+const chart = new Chart(ctx, {
+  type: "line",
+  data: {
+    labels: [],
+    datasets: [{
+      label: "Temperature (°C)",
+      data: [],
+      borderColor: "#f87171",
+      backgroundColor: "rgba(248,113,113,0.1)",
+      fill: true,
+      tension: 0.3,
+      pointRadius: 0,
+    }]
+  },
+  options: {
+    responsive: true,
+    scales: {
+      y: { min: 20, max: 50, grid: { color: "#1e2a3a" }, ticks: { color: "#6b7280" } },
+      x: { grid: { color: "#1e2a3a" }, ticks: { color: "#6b7280", maxTicksLimit: 10 } }
+    },
+    plugins: { legend: { display: false } },
+    animation: { duration: 300 }
+  }
+});
+
+async function fetchTelemetry() {
+  try {
+    const res = await fetch(API + "/telemetry");
+    const data = await res.json();
+    data.reverse();
+    chart.data.labels = data.map(d => new Date(d.timestamp * 1000).toLocaleTimeString());
+    chart.data.datasets[0].data = data.map(d => d.temp);
+
+    const latest = data[data.length - 1];
+    if (latest) {
+      const tempEl = document.getElementById("current-temp");
+      tempEl.textContent = latest.temp.toFixed(1);
+      tempEl.className = "value " + (latest.temp > 35 ? "temp-high" : "temp-normal");
+      document.getElementById("current-humidity").textContent = latest.humidity.toFixed(1);
+
+      const modeBadge = document.getElementById("mode-badge");
+      modeBadge.textContent = latest.mode === "low-power" ? "Low-Power" : "Normal";
+      modeBadge.className = "badge " + (latest.mode === "low-power" ? "green" : "red");
+
+      chart.data.datasets[0].borderColor = latest.temp > 35 ? "#f87171" : "#4ade80";
+      chart.data.datasets[0].backgroundColor = latest.temp > 35 ? "rgba(248,113,113,0.1)" : "rgba(74,222,128,0.1)";
+    }
+    chart.update();
+  } catch (e) { console.error(e); }
+}
+
+async function fetchInsights() {
+  try {
+    const res = await fetch(API + "/insights");
+    const data = await res.json();
+    const el = document.getElementById("insights-list");
+    if (data.length === 0) { el.innerHTML = "<em style='color:#6b7280'>No insights yet — waiting for anomaly...</em>"; return; }
+    el.innerHTML = data.map(d =>
+      `<div class="insight">${d.insight}<div class="meta">${d.temp}°C — ${new Date(d.timestamp * 1000).toLocaleString()}</div></div>`
+    ).join("");
+  } catch (e) { console.error(e); }
+}
+
+async function deployMode(mode) {
+  const btn = mode === 'low-power' ? document.getElementById("fix-btn") : document.getElementById("reset-btn");
+  btn.disabled = true;
+  btn.textContent = "Deploying...";
+  try {
+    const res = await fetch(API + "/deploy-fix", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({mode: mode})
+    });
+    const data = await res.json();
+    btn.textContent = "✅ Deployed — Waiting for device...";
+    btn.className = "btn deployed";
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.textContent = mode === 'low-power' ? '⚡ Deploy Low-Power Mode' : '🔄 Reset to Normal';
+      btn.className = "btn" + (mode === 'normal' ? '' : '');
+      if (mode === 'normal') btn.style.background = '#6b7280';
+      else btn.style.background = '';
+    }, 30000);
+  } catch (e) {
+    btn.textContent = "❌ Failed";
+    btn.disabled = false;
+    console.error(e);
+  }
+}
+
+fetchTelemetry();
+fetchInsights();
+setInterval(fetchTelemetry, 5000);
+setInterval(fetchInsights, 10000);
+</script>
+</body>
+</html>

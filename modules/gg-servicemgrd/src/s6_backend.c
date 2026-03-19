@@ -9,7 +9,9 @@
 #include <gg/log.h>
 #include <ggl/process.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -110,6 +112,11 @@ GgError s6_start_component(
         return ret;
     }
 
+    // Stop any existing instance first
+    if (access(service_dir, F_OK) == 0) {
+        s6_stop_component(component_name);
+    }
+
     // Create service directory with down file (don't auto-start yet)
     mkdir(service_dir, 0755);
 
@@ -171,15 +178,44 @@ GgError s6_stop_component(GgBuffer component_name) {
         return GG_ERR_OK;
     }
 
+    // Read the PID via s6-svstat
+    pid_t svc_pid = 0;
+    {
+        int pfd[2];
+        if (pipe(pfd) == 0) {
+            pid_t ch = fork();
+            if (ch == 0) {
+                close(pfd[0]);
+                dup2(pfd[1], STDOUT_FILENO);
+                close(pfd[1]);
+                execlp("s6-svstat", "s6-svstat", "-p", service_dir, NULL);
+                _exit(1);
+            }
+            close(pfd[1]);
+            char pbuf[32] = { 0 };
+            read(pfd[0], pbuf, sizeof(pbuf) - 1);
+            close(pfd[0]);
+            waitpid(ch, NULL, 0);
+            svc_pid = (pid_t) atoi(pbuf);
+        }
+    }
+    GG_LOGD("Component PID to kill: %d", (int) svc_pid);
+
     // Bring service down
     const char *down_argv[] = { "s6-svc", "-d", service_dir, NULL };
     (void) ggl_process_call(down_argv, NULL);
 
+    // Kill the process directly
+    if (svc_pid > 0) {
+        kill(svc_pid, SIGTERM);
+        usleep(1000000);
+        kill(svc_pid, SIGKILL);
+        usleep(200000);
+    }
+
     // Exit the supervisor
     const char *exit_argv[] = { "s6-svc", "-x", service_dir, NULL };
     (void) ggl_process_call(exit_argv, NULL);
-
-    // Brief wait for supervisor to exit
     usleep(500000);
 
     // Remove service directory

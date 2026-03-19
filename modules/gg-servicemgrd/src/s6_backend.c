@@ -9,9 +9,7 @@
 #include <gg/log.h>
 #include <ggl/process.h>
 #include <limits.h>
-#include <signal.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -106,6 +104,26 @@ static GgError wait_for_supervise(const char *service_dir) {
 GgError s6_start_component(
     GgBuffer component_name, GgBuffer version, GgBuffer phase
 ) {
+    // Install/bootstrap phases are one-shot — run directly, not under s6
+    if (gg_buffer_eq(phase, GG_STR("install"))
+        || gg_buffer_eq(phase, GG_STR("bootstrap"))) {
+        char cmd[512];
+        snprintf(
+            cmd, sizeof(cmd),
+            "recipe-runner -n %.*s -v %.*s -p %.*s",
+            (int) component_name.len, component_name.data,
+            (int) version.len, version.data,
+            (int) phase.len, phase.data
+        );
+        const char *argv[] = { "sh", "-c", cmd, NULL };
+        GG_LOGI(
+            "Running one-shot %.*s phase for %.*s.",
+            (int) phase.len, phase.data,
+            (int) component_name.len, component_name.data
+        );
+        return ggl_process_call(argv, NULL);
+    }
+
     char service_dir[PATH_MAX];
     GgError ret = build_service_dir(component_name, service_dir, sizeof(service_dir));
     if (ret != GG_ERR_OK) {
@@ -130,6 +148,14 @@ GgError s6_start_component(
     ret = write_run_script(service_dir, component_name, version, phase);
     if (ret != GG_ERR_OK) {
         return ret;
+    }
+
+    // Tell s6 to send signal to the entire process group on stop
+    char nosetsid_path[PATH_MAX];
+    snprintf(nosetsid_path, sizeof(nosetsid_path), "%s/nosetsid", service_dir);
+    FILE *nf = fopen(nosetsid_path, "w");
+    if (nf != NULL) {
+        fclose(nf);
     }
 
     // Tell s6-svscan to pick up the new service directory
@@ -178,45 +204,28 @@ GgError s6_stop_component(GgBuffer component_name) {
         return GG_ERR_OK;
     }
 
-    // Read the PID via s6-svstat
-    pid_t svc_pid = 0;
-    {
-        int pfd[2];
-        if (pipe(pfd) == 0) {
-            pid_t ch = fork();
-            if (ch == 0) {
-                close(pfd[0]);
-                dup2(pfd[1], STDOUT_FILENO);
-                close(pfd[1]);
-                execlp("s6-svstat", "s6-svstat", "-p", service_dir, NULL);
-                _exit(1);
-            }
-            close(pfd[1]);
-            char pbuf[32] = { 0 };
-            read(pfd[0], pbuf, sizeof(pbuf) - 1);
-            close(pfd[0]);
-            waitpid(ch, NULL, 0);
-            svc_pid = (pid_t) atoi(pbuf);
-        }
+    // Write down file so s6 won't restart after SIGTERM
+    char down_path[PATH_MAX];
+    snprintf(down_path, sizeof(down_path), "%s/down", service_dir);
+    FILE *df = fopen(down_path, "w");
+    if (df != NULL) {
+        fclose(df);
     }
-    GG_LOGD("Component PID to kill: %d", (int) svc_pid);
 
-    // Bring service down
-    const char *down_argv[] = { "s6-svc", "-d", service_dir, NULL };
+    // Tell s6 to bring service down and wait for process death (5s timeout)
+    const char *down_argv[]
+        = { "s6-svc", "-wD", "-d", "-T", "5000", service_dir, NULL };
     (void) ggl_process_call(down_argv, NULL);
 
-    // Kill the process directly
-    if (svc_pid > 0) {
-        kill(svc_pid, SIGTERM);
-        usleep(1000000);
-        kill(svc_pid, SIGKILL);
-        usleep(200000);
-    }
+    // If still alive after SIGTERM, SIGKILL via s6 and wait again
+    const char *kill_argv[]
+        = { "s6-svc", "-wD", "-k", "-T", "3000", service_dir, NULL };
+    (void) ggl_process_call(kill_argv, NULL);
 
-    // Exit the supervisor
-    const char *exit_argv[] = { "s6-svc", "-x", service_dir, NULL };
+    // Now exit the supervisor (process is dead)
+    const char *exit_argv[]
+        = { "s6-svc", "-wD", "-x", "-T", "5000", service_dir, NULL };
     (void) ggl_process_call(exit_argv, NULL);
-    usleep(500000);
 
     // Remove service directory
     const char *rm_argv[] = { "rm", "-rf", service_dir, NULL };

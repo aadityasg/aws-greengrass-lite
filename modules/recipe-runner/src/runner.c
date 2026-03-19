@@ -437,6 +437,16 @@ static GgError process_lifecycle_phase(
         (int) phase.len,
         phase.data
     );
+
+    // For run/startup phases, exec the command so s6 can signal it directly
+    if (gg_buffer_eq(phase, GG_STR("run"))
+        || gg_buffer_eq(phase, GG_STR("startup"))) {
+        ret = gg_file_write(out_fd, GG_STR("exec "));
+        if (ret != GG_ERR_OK) {
+            return ret;
+        }
+    }
+
     uint8_t *current_pointer = &selected_script_as_buf.data[0];
     uint8_t *end_pointer
         = &selected_script_as_buf.data[selected_script_as_buf.len];

@@ -19,7 +19,6 @@
 #include <netinet/in.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <systemd/sd-daemon.h>
 #include <stdbool.h>
 #include <stdio.h>
 
@@ -303,12 +302,6 @@ GgError http_server(void) {
     );
     if (ret != GG_ERR_OK) {
         return ret;
-    }
-
-    int ret_val = sd_notify(0, "READY=1");
-    if (ret_val < 0) {
-        GG_LOGE("Unable to update component state (errno=%d)", -ret_val);
-        return GG_ERR_FATAL;
     }
 
     // Start the event loop

@@ -9,5 +9,4 @@ ggl_init_module(
        ggl-http
        core-bus
        core-bus-gg-config
-       PkgConfig::libevent
-       PkgConfig::libsystemd)
+       PkgConfig::libevent)

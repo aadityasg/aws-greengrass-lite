@@ -1,0 +1,33 @@
+# GGL no-systemd container: Ubuntu 24.04 + BusyBox + s6
+# Proves full GGL runtime without any systemd dependency.
+# Built without libsystemd-dev, no systemd unit files installed.
+
+FROM localhost/ggl:latest AS builder
+
+FROM ubuntu:24.04
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get -y install --no-install-recommends \
+    s6 busybox ca-certificates procps \
+    libssl3t64 libcurl4t64 libyaml-0-2 liburiparser1 libsqlite3-0 \
+    uuid-runtime libevent-2.1-7t64 libzip4t64 \
+  && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Copy GGL binaries
+COPY --from=builder /usr/bin/ggconfigd /usr/bin/iotcored /usr/bin/ggipcd \
+    /usr/bin/ggpubsubd /usr/bin/tesd /usr/bin/tes-serverd \
+    /usr/bin/gg-servicemgrd /usr/bin/gghealthd /usr/bin/ggdeploymentd \
+    /usr/bin/gg-fleet-statusd /usr/bin/recipe-runner /usr/bin/ggl-cli \
+    /usr/bin/test-supervisor /usr/bin/
+
+# Create users and dirs
+RUN groupadd gg_component && useradd -Ng gg_component gg_component \
+  && groupadd ggcore && useradd -Ng ggcore ggcore \
+  && mkdir -p /etc/greengrass/config.d /var/lib/greengrass /run/greengrass \
+    /run/s6-services
+
+COPY misc/container/01defaults.yaml /etc/greengrass/config.d/01defaults.yaml
+COPY misc/s6-init/init.sh /init.sh
+RUN chmod +x /init.sh
+
+ENTRYPOINT ["/init.sh"]

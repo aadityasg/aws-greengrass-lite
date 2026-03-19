@@ -81,9 +81,9 @@ int main(void) {
 
     while (running) {
         if (low_power) {
-            if (temp > 30.0) temp -= 0.5;
+            if (temp > 30.0) temp -= 2.0;
         } else {
-            if (temp < 45.0) temp += 0.15;
+            if (temp < 45.0) temp += 0.5;
         }
 
         double humidity = 40.0 + (temp - 25.0) * 0.5;
@@ -105,6 +105,6 @@ int main(void) {
             fprintf(stderr, "Publish failed: %d\n", err);
         }
 
-        sleep(5);
+        sleep(2);
     }
 }
